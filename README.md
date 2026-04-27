@@ -49,7 +49,7 @@ Specific versions of the packages installed with PETSc:
 
 ## 2\. Setup a Simulation
 
-1. Create a case folder and paste the "src"-folder and all files including the ".raw" model file in there.
+1. Create a case folder and paste the "src"-folder and all files including the ".raw" model file in there (if you want to run the Rotondo sample, you must unzip it).
 2. Open the "settings.F90" file and change entries for:
   - _casePath_ to path to case folder
   - Optional: Any other variable (see the relevant comment for an explanation)
