@@ -7,15 +7,6 @@
         end if
     end function unsignedToSigned
 
-    integer function signedToUnsigned(greyValue) !should work for input integers kind<4 (i.e. 32 bit)
-        integer(kind=bitLength/8) :: greyValue
-        if (0 <= greyValue .AND. greyValue <= (2**bitLength)/2-1) then
-            signedToUnsigned=greyValue
-        else
-            signedToUnsigned=greyValue+(2**bitLength)
-        end if
-    end function signedToUnsigned
-
     integer function cellPos(x,y,z)
         integer :: x,y,z
         cellPos=nx*ny*(z-1)+nx*(y-1)+x
@@ -48,96 +39,8 @@
         kEval=2*kP*kNB/(kP+kNB)  !harmonic
         !kEval=(kP+kNB)/2         !arithmetic
     end function
-    
-    subroutine countZerosInVector(v)
-        complex(kind=4*realPrecision), dimension(:) :: v
-        integer :: i, nZeros
-        nZeros=0
-        !$omp parallel do reduction(+:nZeros)
-        do i=1,size(v)
-            if (v(i)==0) then
-                nZeros=nZeros+1
-            end if
-        end do
-        !$omp end parallel do
-        write(*,*) 'nSize: ',size(v), 'nZeros: ', nZeros
-    end subroutine
 
-    !functions for the implementation of the BiCGSTAB solver 
-    complex(kind=4*realPrecision) function dotProduct(v1, v2)
-        complex(kind=4*realPrecision), dimension(:) :: v1, v2
-        integer :: i
-        dotProduct=0.0
-        !$omp parallel do reduction(+:dotProduct) !schedule(dynamic, chunkSize)
-            do i=1,size(v1)
-                dotProduct=dotProduct+conjg(v1(i))*v2(i)
-            end do
-        !$omp end parallel do
-    end function  
-    
-    real(kind=4*realPrecision) function dotProductWithItself(v1)
-        complex(kind=4*realPrecision), dimension(:) :: v1
-        integer :: i
-        dotProductWithItself=0.0
-        !$omp parallel do reduction(+:dotProductWithItself) !schedule(dynamic, chunkSize)
-            do i=1,size(v1)
-                dotProductWithItself=dotProductWithItself+real(v1(i))**2+imag(v1(i))**2
-            end do
-        !$omp end parallel do
-    end function  
-
-    subroutine symHeptaMatrixTimesVector(MD, OD1, OD2, OD3, v, posOD1, posOD2, posOD3, resVec) !only valid for symmetric heptadiagonal matrices
-        complex(kind=4*realPrecision), dimension(:) :: MD, OD1, OD2, OD3, v, resVec
-        integer :: posOD1, posOD2, posOD3, i
-        integer, parameter :: nCells=nx*ny*nz
-        !$omp parallel do !schedule(dynamic, chunkSize)
-            do i=1,nx*ny*nz !logic might be enhanced with less if statements, but maybe code readability might suffer
-                resVec(i)=MD(i)*v(i)
-                if (i<=nCells-posOD1) then               !first positiv offdiagonal is active
-                    resVec(i)=resVec(i)+OD1(i)*v(i+posOD1)
-                end if
-                if (i<=nCells-posOD2) then               !second positiv offdiagonal is active
-                    resVec(i)=resVec(i)+OD2(i)*v(i+posOD2)
-                end if
-                if (i<=nCells-posOD3) then               !third positiv offdiagonal is active
-                    resVec(i)=resVec(i)+OD3(i)*v(i+posOD3)
-                end if
-                if (posOD1<i) then                       !first negativ offdiagonal is active
-                    resVec(i)=resVec(i)+OD1(i-posOD1)*v(i-posOD1)
-                end if
-                if (posOD2<i) then                       !second negativ offdiagonal is active
-                    resVec(i)=resVec(i)+OD2(i-posOD2)*v(i-posOD2)
-                end if
-                if (posOD3<i) then                       !third negativ offdiagonal is active
-                    resVec(i)=resVec(i)+OD3(i-posOD3)*v(i-posOD3)
-                end if
-            end do
-        !$omp end parallel do
-    end subroutine symHeptaMatrixTimesVector
-
-    subroutine vectorPlusScalarTimesVector(v1, s, v2, resVec)
-        complex(kind=4*realPrecision), dimension(:) :: v1, v2, resVec
-        complex(kind=4*realPrecision) :: s
-        integer :: i
-        !$omp parallel do !schedule(dynamic, chunkSize)
-            do i=1,size(v1)
-                resVec(i)=v1(i)+s*v2(i)
-            end do
-        !$omp end parallel do
-    end subroutine vectorPlusScalarTimesVector       
-
-    real(kind=4*realPrecision) function sumOfAbsComponents(v1)
-        complex(kind=4*realPrecision), dimension(:) :: v1
-        integer :: i
-        sumOfAbsComponents=0
-        !$omp parallel do reduction(+:sumOfAbsComponents) !schedule(dynamic, chunkSize)
-            do i=1,size(v1)
-                sumOfAbsComponents=sumOfAbsComponents+abs(v1(i))
-            end do
-        !$omp end parallel do
-    end function
-
-    !functions for postprocessing (determination of heatFlux)
+    !functions for postprocessing (determination of flux)
     complex(kind=4*realPrecision) function calcFluxX(xTarget,BC,xField)
         integer :: y, z, xTarget, currCell
         integer(kind=1) :: BC
@@ -191,3 +94,36 @@
         !$omp end parallel do
         calcFluxZ=-calcFluxZ*(2*dx*dy/dz);
     end function
+	
+	!############### Flux Calculation for PETSc ###############
+	subroutine compute_results(solution, kEff, eEff, totalFlux_0, totalFlux_1)
+		implicit none
+		
+		real(kind=4*realPrecision) :: kAveFlux, eAveFlux
+		complex(kind=4*realPrecision), intent(in) :: solution(:)
+		real(kind=4*realPrecision), intent(out) :: kEff, eEff
+		complex(kind=4*realPrecision), intent(out) :: totalFlux_0, totalFlux_1
+		
+		if (evalDirection=='X') then
+			totalFlux_0 = calcFluxX(nx, BC_F, solution) ! totalFluxFront
+			totalFlux_1 = calcFluxX(1, BC_B, solution) ! totalFluxBack
+			kAveFlux = (abs(real(totalFlux_1)) + abs(real(totalFlux_0))) / 2.0d0
+			eAveFlux = (abs(imag(totalFlux_1)) + abs(imag(totalFlux_0))) / 2.0d0
+			kEff=kAveFlux/abs(BC_F-BC_B)*(nx*dx)/(ny*dy*nz*dz)
+			eEff=eAveFlux/abs(BC_F-BC_B)*(nx*dx)/(ny*dy*nz*dz)/(omega*e0)
+		else if (evalDirection=='Y') then
+			totalFlux_0 = calcFluxY(ny, BC_E, solution) ! totalFluxEast
+			totalFlux_1 = calcFluxY(1, BC_W, solution) ! totalFluxWest
+			kAveFlux = (abs(real(totalFlux_1)) + abs(real(totalFlux_0))) / 2.0d0
+			eAveFlux = (abs(imag(totalFlux_1)) + abs(imag(totalFlux_0))) / 2.0d0
+			kEff=kAveFlux/abs(BC_E-BC_W)*(ny*dy)/(nx*dx*nz*dz)
+			eEff=eAveFlux/abs(BC_E-BC_W)*(ny*dy)/(nx*dx*nz*dz)/(omega*e0)
+		else if (evalDirection=='Z') then
+			totalFlux_0 = calcFluxZ(nz, BC_N, solution) ! totalFluxNorth
+			totalFlux_1 = calcFluxZ(1, BC_S, solution) ! totalFluxSouth
+			kAveFlux = (abs(real(totalFlux_1)) + abs(real(totalFlux_0))) / 2.0d0
+			eAveFlux = (abs(imag(totalFlux_1)) + abs(imag(totalFlux_0))) / 2.0d0
+			kEff=kAveFlux/abs(BC_N-BC_S)*(nz*dz)/(nx*dx*ny*dy)
+			eEff=eAveFlux/abs(BC_N-BC_S)*(nz*dz)/(nx*dx*ny*dy)/(omega*e0)
+		end if
+	end subroutine compute_results
